@@ -1,5 +1,8 @@
 """Streamlit FEM Analysis App — main entry point."""
 
+# Number of vertices per beam cross-section (rectangular: 4 corners)
+VERTS_PER_CROSS_SECTION = 4
+
 import numpy as np
 import plotly.graph_objects as go
 import pandas as pd
@@ -84,12 +87,13 @@ with st.sidebar:
         lb_l1, lb_l2, lb_t, lb_n = 1.0, 0.8, 0.1, 5
 
     if shape == "Plate (2D)":
-        pl_w  = st.slider("Width [m]", 0.1, 5.0, 1.0, 0.1, key="pl_w")
-        pl_h  = st.slider("Height [m]", 0.1, 5.0, 0.5, 0.1, key="pl_h")
-        pl_nx = st.slider("Divs X", 2, 20, 8, 1, key="pl_nx")
-        pl_ny = st.slider("Divs Y", 2, 20, 4, 1, key="pl_ny")
+        pl_w   = st.slider("Width [m]", 0.1, 5.0, 1.0, 0.1, key="pl_w")
+        pl_h   = st.slider("Height [m]", 0.1, 5.0, 0.5, 0.1, key="pl_h")
+        pl_t   = st.slider("Thickness [m]", 0.001, 0.1, 0.01, 0.001, key="pl_t")
+        pl_nx  = st.slider("Divs X", 2, 20, 8, 1, key="pl_nx")
+        pl_ny  = st.slider("Divs Y", 2, 20, 4, 1, key="pl_ny")
     else:
-        pl_w, pl_h, pl_nx, pl_ny = 1.0, 0.5, 8, 4
+        pl_w, pl_h, pl_t, pl_nx, pl_ny = 1.0, 0.5, 0.01, 8, 4
 
     # ── Material ──────────────────────────────────────────────────────────
     st.subheader("🧱 Material")
@@ -336,8 +340,8 @@ with tab_results:
                     n_face_verts = len(verts)
                     intensity_vert = np.zeros(n_face_verts)
                     for e in range(n_elem):
-                        for lv in range(4):
-                            vi = 4 * e + lv
+                        for lv in range(VERTS_PER_CROSS_SECTION):
+                            vi = VERTS_PER_CROSS_SECTION * e + lv
                             if vi < n_face_verts:
                                 intensity_vert[vi] = sigma[e]
 
@@ -346,16 +350,16 @@ with tab_results:
                         for local_cs in range(2):
                             node_idx = e + local_cs
                             v_disp = v_nodes[node_idx] * scale_factor
-                            base = 4 * (e + local_cs)
-                            if base + 3 < len(verts_def):
-                                verts_def[base:base+4, 1] += v_disp
+                            base = VERTS_PER_CROSS_SECTION * (e + local_cs)
+                            if base + VERTS_PER_CROSS_SECTION - 1 < len(verts_def):
+                                verts_def[base:base+VERTS_PER_CROSS_SECTION, 1] += v_disp
 
                     if result_type == "Displacement":
                         intensity_vert = np.zeros(n_face_verts)
                         for e in range(n_elem):
                             avg_d = (abs(v_nodes[e]) + abs(v_nodes[e+1])) / 2.0
-                            for lv in range(4):
-                                vi = 4 * e + lv
+                            for lv in range(VERTS_PER_CROSS_SECTION):
+                                vi = VERTS_PER_CROSS_SECTION * e + lv
                                 if vi < n_face_verts:
                                     intensity_vert[vi] = avg_d
 
@@ -405,7 +409,7 @@ with tab_results:
                         elements=plate_faces,
                         E=E_val,
                         nu=nu_val,
-                        thickness=0.01,
+                        thickness=pl_t,
                         forces_dict=forces_dict,
                         fixed_dofs=fixed_dofs,
                     )
@@ -511,6 +515,7 @@ with tab_report:
         params_rows += [
             ("Width", f"{pl_w} m"),
             ("Height", f"{pl_h} m"),
+            ("Thickness", f"{pl_t} m"),
             ("Nx", str(pl_nx * mesh_mult)),
             ("Ny", str(pl_ny * mesh_mult)),
         ]

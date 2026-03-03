@@ -223,15 +223,17 @@ def make_lbracket_mesh(l1: float, l2: float, t: float, n: int):
     n  : divisions per unit length (approx)
     """
     n = max(n, 2)
+    total = l1 + l2
+    n_horizontal = max(1, int(n * l1 / total))
+    n_vertical   = max(1, int(n * l2 / total))
     # Horizontal leg: x in [0, l1], y in [0, t]
     # Vertical leg  : x in [0, t],  y in [t, t+l2]
-    h_verts, h_faces = make_plate_mesh(l1, t, max(1, int(n * l1 / (l1 + l2))), n)
+    h_verts, h_faces = make_plate_mesh(l1, t, n_horizontal, n)
     # Shift h_verts' z to [0, t] (extrude in Z)
-    h_verts3d_bot = h_verts.copy()
     h_verts3d_top = h_verts.copy()
     h_verts3d_top[:, 2] = t
 
-    v_verts, v_faces = make_plate_mesh(t, l2, n, max(1, int(n * l2 / (l1 + l2))))
+    v_verts, v_faces = make_plate_mesh(t, l2, n, n_vertical)
     v_verts[:, 1] += t  # shift Y by t to sit above horizontal leg
 
     # Combine both legs (top face only for simplicity, closed by box caps)
