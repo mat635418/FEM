@@ -1,18 +1,9 @@
-# UI Framework
 streamlit
-
-# 3D Visualization
 pyvista
 st-pyvista
-
-# Core Mathematics & FEM Solvers
 numpy
 scipy
 scikit-fem
-
-# Mesh Handling (to import/export CAD shapes)
 meshio
-gmsh  # Required if you want to generate complex tetrahedral meshes
-
-# Graphical Backend (for headless server rendering)
+gmsh
 matplotlib
