@@ -1,9 +1,4 @@
 streamlit
 pyvista
-st-pyvista
 numpy
-scipy
-scikit-fem
-meshio
-gmsh
 matplotlib
