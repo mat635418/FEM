@@ -1,0 +1,8 @@
+streamlit
+numpy
+scipy
+pyvista
+st-pyvista
+meshio
+scikit-fem
+matplotlib
