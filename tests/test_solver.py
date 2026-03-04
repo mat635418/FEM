@@ -67,21 +67,19 @@ class TestPatchTest:
     """Constant-strain patch test: uniform axial extension."""
 
     def test_uniform_axial_extension(self):
-        """Applying a uniform axial traction on the right edge of a rectangular
-        mesh (fixed left) must produce constant sigma_xx across the domain."""
+        """Applying a distributed transverse traction on the right face of a
+        rectangular mesh (fixed left) must produce a finite, non-trivial
+        displacement solution."""
         L, H = 1.0, 0.1
         E, nu = 210e9, 0.3
-        force = 10_000.0  # positive → tension in +y... but we test x here
+        force = 10_000.0  # N, transverse (−y) traction applied to right face
 
-        # Use the solver; then check that all computed nodal displacements in x
-        # are non-negative and increase monotonically from left to right.
         mesh = make_cantilever_mesh(L, H, nx=10, ny=4)
-        u, basis = solve_plane_stress(
+        u, _basis = solve_plane_stress(
             mesh, E, nu, force, fixed_boundary="left", load_boundary="right"
         )
 
-        # For a downward load on the right face, the beam tip should deflect in -y
-        # The sign of u_x displacement in the patch test is geometry-dependent;
-        # what we assert here is simply that the solver converges (no NaN/Inf).
+        # Verify solver convergence: solution must be finite
         assert np.all(np.isfinite(u)), "Solution contains NaN or Inf values."
-        assert u.shape[0] > 0
+        # Verify non-trivial result: at least some DOFs have non-zero displacement
+        assert np.abs(u).max() > 0.0, "All displacements are zero for non-zero force."

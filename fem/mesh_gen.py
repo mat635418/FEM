@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import scipy.spatial
 import skfem
 
 
@@ -116,9 +117,7 @@ def make_hollow_section_mesh(
             pts.append([r * np.cos(t), r * np.sin(t)])
     pts_arr = np.array(pts, dtype=float)
 
-    from scipy.spatial import Delaunay  # noqa: PLC0415
-
-    tri = Delaunay(pts_arr)
+    tri = scipy.spatial.Delaunay(pts_arr)
 
     # Remove triangles whose centroid falls inside the inner hole
     centroids = pts_arr[tri.simplices].mean(axis=1)
