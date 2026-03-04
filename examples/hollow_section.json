@@ -1,0 +1,15 @@
+{
+  "shape": "Hollow Section",
+  "geometry": {
+    "R_out": 1.0,
+    "R_in": 0.4,
+    "refine": 2
+  },
+  "material": {
+    "name": "Aluminium 6061-T6",
+    "E_Pa": 69000000000.0,
+    "nu": 0.33,
+    "yield_strength_Pa": 276000000.0
+  },
+  "load_N": -20000.0
+}

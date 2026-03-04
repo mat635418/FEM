@@ -1,0 +1,16 @@
+{
+  "shape": "Cantilever Beam",
+  "geometry": {
+    "L": 2.0,
+    "H": 0.1,
+    "nx": 20,
+    "ny": 6
+  },
+  "material": {
+    "name": "Steel (S235)",
+    "E_Pa": 210000000000.0,
+    "nu": 0.3,
+    "yield_strength_Pa": 235000000.0
+  },
+  "load_N": -50000.0
+}
