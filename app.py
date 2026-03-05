@@ -2,6 +2,10 @@
 
 This file contains only Streamlit presentation logic.
 All physics is delegated to the ``fem`` package.
+
+Fix applied (Option A): use _basis.doflocs instead of mesh.p for the
+PyVista visualisation and CSV export so that array sizes match the P2
+displacement vector u and vm_stress (both sized by n_p2_nodes, not n_corner_nodes).
 """
 
 from __future__ import annotations
@@ -111,7 +115,7 @@ with st.sidebar:
     if force_val == 0.0:
         st.warning("Force is zero — displacement will be zero everywhere.")
 
-    # ── Visualisation options ─────────────────────────────────────────────────
+    # ── Visualisation options ─────────────────────────────��───────────────────
     st.divider()
     st.header("4. Visualisation")
     show_deformed = st.checkbox("Show deformed shape", value=True)
@@ -130,7 +134,7 @@ def cached_solve(
     _nu: float,
     _force: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Run FEM solver; return displacement u, node coordinates, element connectivity."""
+    """Run FEM solver; return displacement u, corner node coords, corner connectivity."""
     if shape == "Cantilever Beam":
         mesh = make_cantilever_mesh(geo[0], geo[1], nx=int(geo[2]), ny=int(geo[3]))
         fixed, load = "left", "right"
@@ -142,6 +146,7 @@ def cached_solve(
         fixed, load = "left", "right"
 
     u, _basis = solve_plane_stress(mesh, _E, _nu, _force, fixed, load)
+    # mesh.p and mesh.t are corner-only; used only to rebuild the mesh in post-proc
     return u, mesh.p.copy(), mesh.t.copy()
 
 
@@ -219,9 +224,16 @@ with col_metrics:
 
 with col_plot:
     # ── Build PyVista mesh for visualisation ──────────────────────────────────
-    # Use P2 DOF locations — these match the length of u and vm_stress exactly.
-    # scikit-fem places corner nodes first in the P2 ordering, so mesh.t corner
-    # indices remain valid into the full P2 node array.
+    #
+    # FIX (Option A): use _basis.doflocs — the P2 DOF coordinates — instead of
+    # mesh.p (corner nodes only).  scikit-fem sizes u and vm_stress by the
+    # number of P2 nodes, which is larger than the number of corner nodes, so
+    # using mesh.p caused a shape mismatch.  _basis.doflocs has exactly one
+    # coordinate row per P2 DOF, so all three arrays align correctly.
+    #
+    # scikit-fem places corner nodes first in P2 ordering, so mesh.t corner
+    # indices remain valid into the P2 node array — no face-connectivity change
+    # is needed.
     dof_locs = _basis.doflocs          # shape (2, n_p2_nodes)
     n_nodes_2d = dof_locs.shape[1]    # == len(u[0::2]) == len(vm_stress)
 
@@ -265,7 +277,7 @@ with col_plot:
     st.subheader("📥 Export")
     ecols = st.columns(3)
 
-    # Use dof_locs for x/y coordinates (matches disp and vm_stress lengths)
+    # Use dof_locs for x/y — same length as u and vm_stress
     df = pd.DataFrame(
         {
             "x": dof_locs[0],
