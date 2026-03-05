@@ -1,0 +1,13 @@
+{
+  "shape": "L-Bracket",
+  "geometry": {
+    "refine": 2
+  },
+  "material": {
+    "name": "Steel (S235)",
+    "E_Pa": 210000000000.0,
+    "nu": 0.3,
+    "yield_strength_Pa": 235000000.0
+  },
+  "load_N": -10000.0
+}

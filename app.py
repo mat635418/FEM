@@ -1,115 +1,318 @@
-import streamlit as st
-import numpy as np
-import pyvista as pv
+"""FEM Lab — Streamlit UI (thin orchestrator).
 
-# --- CRITICAL: Must be set before any PyVista/VTK calls ---
+This file contains only Streamlit presentation logic.
+All physics is delegated to the ``fem`` package.
+
+Fix applied (Option A): use _basis.doflocs instead of mesh.p for the
+PyVista visualisation and CSV export so that array sizes match the P2
+displacement vector u and vm_stress (both sized by n_p2_nodes, not n_corner_nodes).
+"""
+
+from __future__ import annotations
+
+import io
+import json
+
+import numpy as np
+import pandas as pd
+import pyvista as pv
+import skfem as _skfem
+import streamlit as st
+from PIL import Image
+from skfem import Basis, ElementVector
+
+from fem.materials import MATERIALS
+from fem.mesh_gen import (
+    make_cantilever_mesh,
+    make_hollow_section_mesh,
+    make_l_bracket_mesh,
+)
+from fem.postprocess import (
+    compute_safety_factor,
+    compute_strain_energy,
+    compute_von_mises,
+)
+from fem.solver import assemble_stiffness, solve_plane_stress
+
+# ── Critical: headless rendering must be set before any PyVista calls ──────
 pv.OFF_SCREEN = True
 
-# --- Page Config ---
+# ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Python FEM Lab", layout="wide")
 
-# --- Sidebar UI ---
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🏗️ FEM Lab Settings")
 
+    # ── 1. Geometry ──────────────────────────────────────────────────────────
     st.header("1. Geometry Selection")
     shape_type = st.selectbox(
-        "Select Solid Template",
-        ["Cantilever Beam", "Hollow Cylinder", "L-Bracket"]
+        "Select Cross-Section Template",
+        ["Cantilever Beam", "Hollow Section", "L-Bracket"],
     )
 
-    st.header("2. Physical Parameters")
+    st.header("2. Geometry Parameters")
+    geo_params: dict
+
     if shape_type == "Cantilever Beam":
-        L = st.slider("Length (m)", 1.0, 10.0, 5.0)
-        W = st.slider("Width (m)", 0.1, 1.0, 0.3)
-        H = st.slider("Height (m)", 0.1, 1.0, 0.5)
-        mesh = pv.Box(bounds=(0, L, -W/2, W/2, -H/2, H/2), level=1)
+        L = st.slider("Length (m)", 0.5, 10.0, 2.0, step=0.5)
+        H = st.slider("Height (m)", 0.02, 1.0, 0.1, step=0.01)
+        nx = st.slider("Elements along length", 10, 60, 20, step=5)
+        ny = st.slider("Elements along height", 2, 20, 6, step=1)
+        geo_params = {"L": L, "H": H, "nx": nx, "ny": ny}
 
-    elif shape_type == "Hollow Cylinder":
-        rad = st.slider("Outer Radius", 0.5, 2.0, 1.0)
-        inner_rad = st.slider("Inner Radius", 0.1, 0.4, 0.2)
-        height = st.slider("Height", 1.0, 5.0, 3.0)
-        # CylinderStructured returns a StructuredGrid; cast to Unstructured for warp support
-        mesh = pv.CylinderStructured(
-            radius=[inner_rad, rad],
-            height=height,
-            theta_resolution=20
-        ).cast_to_unstructured_grid()
+    elif shape_type == "Hollow Section":
+        outer_rad = st.slider("Outer Radius (m)", 0.2, 2.0, 1.0, step=0.1)
+        inner_rad = st.slider("Inner Radius (m)", 0.05, 1.8, 0.4, step=0.05)
+        refine = st.slider("Mesh refinement steps", 1, 3, 2)
+        geo_params = {"R_out": outer_rad, "R_in": inner_rad, "refine": refine}
 
-    elif shape_type == "L-Bracket":
-        mesh = pv.Box(bounds=(0, 2, 0, 0.5, 0, 2))
-        st.info("L-Bracket template uses a standard structural mesh.")
+        if inner_rad >= outer_rad * 0.9:
+            st.error(
+                f"Inner radius ({inner_rad:.2f} m) must be less than 90 % of "
+                f"outer radius ({outer_rad:.2f} m).  Please adjust the sliders."
+            )
+            st.stop()
 
+    else:  # L-Bracket
+        refine = st.slider("Mesh refinement steps", 1, 3, 2)
+        geo_params = {"refine": refine}
+
+    # ── 3. Material & Load ───────────────────────────────────────────────────
     st.divider()
-
     st.header("3. Material & Load")
-    E = st.number_input("Young's Modulus (GPa)", value=210) * 1e9  # Steel default
-    force_val = st.slider("Vertical Force (kN)", -100, 100, -50) * 1000
-    warp_factor = st.slider("Exaggerate Deformation", 1, 1000, 100)
 
+    material_name = st.selectbox("Material", list(MATERIALS.keys()))
+    mat = MATERIALS[material_name]
 
-# --- FEM Logic (Simplified Solver) ---
-def run_simulation(mesh, force_magnitude, youngs_modulus):
-    """
-    Simulates stress by calculating a displacement vector
-    based on the vertical Z-load applied to the 'tip' of the mesh.
-    Returns displacement (Nx3 array) and stress (N,) scalar array.
-    """
-    x_coords = mesh.points[:, 0]
+    if mat is not None:
+        E_default = float(mat["E"])
+        nu_default = float(mat["nu"])
+        yield_strength = float(mat["yield_strength"])
+        st.caption(
+            f"E = {E_default/1e9:.0f} GPa  |  ν = {nu_default}  |  "
+            f"σ_y = {yield_strength/1e6:.0f} MPa"
+        )
+        E = E_default
+    else:
+        E = st.number_input("Young's Modulus (GPa)", value=210.0, min_value=1.0) * 1e9
+        nu_default = 0.30
+        yield_strength = (
+            st.number_input("Yield strength (MPa)", value=235.0, min_value=1.0) * 1e6
+        )
 
-    # Simplified displacement field: delta_z ~ (F * x^2) / (2 * E * I)
-    # 1e-4 is a representative moment of inertia scaling factor (m^4)
-    displacement = np.zeros((mesh.n_points, 3), dtype=float)
-    displacement[:, 2] = (force_magnitude * (x_coords ** 2)) / (youngs_modulus * 1e-4)
-
-    # Von Mises Stress proxy (proportional to curvature / derivative of displacement)
-    # 1e11 normalises the stress to a physically meaningful Pa range for steel (E ~ 210 GPa)
-    stress = np.abs(displacement[:, 2]) * (youngs_modulus / 1e11)
-
-    return displacement, stress
-
-
-# --- Main App ---
-st.title(f"Visualizing Stress: {shape_type}")
-
-col1, col2 = st.columns([3, 1])
-
-with col1:
-    # Run Solver
-    disp, stress = run_simulation(mesh, force_val, E)
-
-    # --- FIX: Store displacement vectors in mesh point_data BEFORE warping ---
-    mesh.point_data["Displacement"] = disp        # Nx3 vector array
-    mesh.point_data["Stress (Pa)"] = stress       # N scalar array
-
-    # --- FIX: warp_by_vector references the named vector field ---
-    warped_mesh = mesh.warp_by_vector("Displacement", factor=warp_factor)
-
-    # Setup PyVista Plotter (off_screen required for Streamlit / headless)
-    plotter = pv.Plotter(window_size=[800, 600], off_screen=True)
-    plotter.add_mesh(
-        warped_mesh,
-        scalars="Stress (Pa)",
-        cmap="jet",
-        show_edges=True
+    nu = st.slider(
+        "Poisson's ratio (ν)",
+        0.01,
+        0.49,
+        float(nu_default),
+        step=0.01,
     )
-    plotter.add_scalar_bar(title="Von Mises Stress Proxy")
-    plotter.background_color = "white"
-    plotter.view_isometric()
 
-    # Render to image and display in Streamlit
+    force_kn = st.slider("Vertical Force (kN)", -200.0, 200.0, -50.0, step=5.0)
+    force_val = force_kn * 1_000.0  # N
+
+    if force_val == 0.0:
+        st.warning("Force is zero — displacement will be zero everywhere.")
+
+    # ── Visualisation options ─────────────────────────────��───────────────────
+    st.divider()
+    st.header("4. Visualisation")
+    show_deformed = st.checkbox("Show deformed shape", value=True)
+    warp_factor = st.slider("Deformation scale factor", 1, 5_000, 100)
+    cmap = st.selectbox(
+        "Colormap", ["viridis", "plasma", "inferno", "coolwarm", "jet"], index=0
+    )
+
+
+# ── Cached solver call ───────────────────────────────────────────────────────
+@st.cache_data(show_spinner="⚙️ Running FEM solver…", ttl=300)
+def cached_solve(
+    shape: str,
+    geo: tuple,
+    _E: float,
+    _nu: float,
+    _force: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Run FEM solver; return displacement u, corner node coords, corner connectivity."""
+    if shape == "Cantilever Beam":
+        mesh = make_cantilever_mesh(geo[0], geo[1], nx=int(geo[2]), ny=int(geo[3]))
+        fixed, load = "left", "right"
+    elif shape == "Hollow Section":
+        mesh = make_hollow_section_mesh(geo[0], geo[1], refine=int(geo[2]))
+        fixed, load = "left", "right"
+    else:
+        mesh = make_l_bracket_mesh(refine=int(geo[0]))
+        fixed, load = "left", "right"
+
+    u, _basis = solve_plane_stress(mesh, _E, _nu, _force, fixed, load)
+    # mesh.p and mesh.t are corner-only; used only to rebuild the mesh in post-proc
+    return u, mesh.p.copy(), mesh.t.copy()
+
+
+# ── Build geo tuple (cache key) ──────────────────────────────────────────────
+if shape_type == "Cantilever Beam":
+    geo_tuple: tuple = (geo_params["L"], geo_params["H"], geo_params["nx"], geo_params["ny"])
+elif shape_type == "Hollow Section":
+    geo_tuple = (geo_params["R_out"], geo_params["R_in"], geo_params["refine"])
+else:
+    geo_tuple = (geo_params["refine"],)
+
+# ── Solve ────────────────────────────────────────────────────────────────────
+st.title(f"🔬 FEM Lab — {shape_type}")
+
+try:
+    u, pts, tris = cached_solve(shape_type, geo_tuple, E, nu, force_val)
+except Exception as exc:
+    st.error(
+        f"**Solver failed:** {exc}\n\n"
+        "Try reducing the force magnitude, using a coarser mesh, or choosing a "
+        "different geometry."
+    )
+    st.stop()
+
+# ── Post-processing (not cached — runs fast) ─────────────────────────────────
+if shape_type == "Cantilever Beam":
+    _mesh = make_cantilever_mesh(
+        geo_params["L"],
+        geo_params["H"],
+        nx=geo_params["nx"],
+        ny=geo_params["ny"],
+    )
+elif shape_type == "Hollow Section":
+    _mesh = make_hollow_section_mesh(
+        geo_params["R_out"], geo_params["R_in"], refine=geo_params["refine"]
+    )
+else:
+    _mesh = make_l_bracket_mesh(refine=geo_params["refine"])
+
+_element = ElementVector(_skfem.ElementTriP2())
+_basis = Basis(_mesh, _element)
+_K = assemble_stiffness(_basis, E, nu)
+
+vm_stress = compute_von_mises(_basis, u, E, nu)
+sf = compute_safety_factor(vm_stress, yield_strength)
+se = compute_strain_energy(_K, u)
+
+max_disp = float(np.sqrt(u[0::2] ** 2 + u[1::2] ** 2).max())
+peak_vm = float(vm_stress.max())
+n_dofs = int(u.shape[0])
+
+# ── Layout ────────────────────────────────────────────────────────────────────
+col_plot, col_metrics = st.columns([3, 1])
+
+with col_metrics:
+    st.subheader("📊 Results")
+    st.metric("Max Displacement", f"{max_disp:.4e} m")
+    st.metric("Peak Von Mises", f"{peak_vm:.3e} Pa")
+    st.metric("DOF count", f"{n_dofs:,}")
+    st.metric("Strain Energy", f"{se:.3e} J")
+
+    if sf == float("inf"):
+        sf_label = "∞"
+        sf_icon = "🟢"
+    else:
+        sf_label = f"{sf:.2f}"
+        sf_icon = "🟢" if sf > 2.0 else ("🟠" if sf > 1.0 else "🔴")
+    st.metric("Safety Factor", f"{sf_icon} {sf_label}")
+
+    st.write("### Simulation Notes")
+    st.caption(
+        "Plane-stress 2-D FEM using triangular P2 elements (scikit-fem).  "
+        "Load is applied as a uniform distributed traction on the free edge."
+    )
+
+with col_plot:
+    # ── Build PyVista mesh for visualisation ──────────────────────────────────
+    #
+    # FIX (Option A): use _basis.doflocs — the P2 DOF coordinates — instead of
+    # mesh.p (corner nodes only).  scikit-fem sizes u and vm_stress by the
+    # number of P2 nodes, which is larger than the number of corner nodes, so
+    # using mesh.p caused a shape mismatch.  _basis.doflocs has exactly one
+    # coordinate row per P2 DOF, so all three arrays align correctly.
+    #
+    # scikit-fem places corner nodes first in P2 ordering, so mesh.t corner
+    # indices remain valid into the P2 node array — no face-connectivity change
+    # is needed.
+    dof_locs = _basis.doflocs          # shape (2, n_p2_nodes)
+    n_nodes_2d = dof_locs.shape[1]    # == len(u[0::2]) == len(vm_stress)
+
+    pts_3d = np.zeros((n_nodes_2d, 3))
+    pts_3d[:, 0] = dof_locs[0]
+    pts_3d[:, 1] = dof_locs[1]
+
+    n_elems = tris.shape[1]
+    faces = np.hstack(
+        [np.full((n_elems, 1), 3, dtype=np.int32), tris.T.astype(np.int32)]
+    ).ravel()
+
+    pv_mesh = pv.PolyData(pts_3d, faces)
+    pv_mesh.point_data["Von Mises (Pa)"] = vm_stress
+
+    disp_3d = np.zeros((n_nodes_2d, 3))
+    disp_3d[:, 0] = u[0::2]
+    disp_3d[:, 1] = u[1::2]
+    pv_mesh.point_data["Displacement"] = disp_3d
+
+    plot_mesh = (
+        pv_mesh.warp_by_vector("Displacement", factor=warp_factor)
+        if show_deformed
+        else pv_mesh
+    )
+
+    plotter = pv.Plotter(window_size=[900, 600], off_screen=True)
+    plotter.add_mesh(
+        plot_mesh,
+        scalars="Von Mises (Pa)",
+        cmap=cmap,
+        show_edges=True,
+        scalar_bar_args={"title": "Von Mises Stress (Pa)"},
+    )
+    plotter.background_color = "white"
+    plotter.view_xy()
     screenshot = plotter.screenshot(return_img=True)
     st.image(screenshot, use_container_width=True)
 
-with col2:
-    st.metric("Max Displacement", f"{np.max(np.abs(disp[:, 2])):.4f} m")
-    st.metric("Peak Stress", f"{np.max(stress):.2e} Pa")
+    # ── Export buttons ────────────────────────────────────────────────────────
+    st.subheader("📥 Export")
+    ecols = st.columns(3)
 
-    st.write("### Simulation Notes")
-    st.caption("""
-    The visualization shows the mesh in a **deformed state**.
-    The red areas indicate high stress concentration where
-    structural failure is most likely to occur.
-    """)
+    # Use dof_locs for x/y — same length as u and vm_stress
+    df = pd.DataFrame(
+        {
+            "x": dof_locs[0],
+            "y": dof_locs[1],
+            "disp_x": u[0::2],
+            "disp_y": u[1::2],
+            "von_mises_pa": vm_stress,
+        }
+    )
+    ecols[0].download_button(
+        "📄 Results (CSV)", df.to_csv(index=False), "fem_results.csv", "text/csv"
+    )
 
-st.success("Simulation Complete. Adjust sliders to see real-time updates!")
+    problem_def = {
+        "shape": shape_type,
+        "geometry": geo_params,
+        "material": {
+            "name": material_name,
+            "E_Pa": E,
+            "nu": nu,
+            "yield_strength_Pa": yield_strength,
+        },
+        "load_N": force_val,
+    }
+    ecols[1].download_button(
+        "📋 Problem (JSON)",
+        json.dumps(problem_def, indent=2),
+        "problem.json",
+        "application/json",
+    )
+
+    img_buf = io.BytesIO()
+    Image.fromarray(screenshot).save(img_buf, format="PNG")
+    ecols[2].download_button(
+        "🖼️ Plot (PNG)", img_buf.getvalue(), "fem_result.png", "image/png"
+    )
+
+st.success("✅ Simulation complete. Adjust sidebar controls to update.")
