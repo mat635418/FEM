@@ -33,10 +33,10 @@ from fem.solver import assemble_stiffness, solve_plane_stress
 # ── Critical: headless rendering must be set before any PyVista calls ──────
 pv.OFF_SCREEN = True
 
-# ── Page config ─────────────────────────────────────────────────────────────
+# ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Python FEM Lab", layout="wide")
 
-# ── Sidebar ─────────────────────────────────────────────────────────────────
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🏗️ FEM Lab Settings")
 
@@ -193,7 +193,7 @@ max_disp = float(np.sqrt(u[0::2] ** 2 + u[1::2] ** 2).max())
 peak_vm = float(vm_stress.max())
 n_dofs = int(u.shape[0])
 
-# ── Layout ───────────────────────────────────────────────────────────────────
+# ── Layout ────────────────────────────────────────────────────────────────────
 col_plot, col_metrics = st.columns([3, 1])
 
 with col_metrics:
@@ -219,10 +219,15 @@ with col_metrics:
 
 with col_plot:
     # ── Build PyVista mesh for visualisation ──────────────────────────────────
-    n_nodes_2d = pts.shape[1]
+    # Use P2 DOF locations — these match the length of u and vm_stress exactly.
+    # scikit-fem places corner nodes first in the P2 ordering, so mesh.t corner
+    # indices remain valid into the full P2 node array.
+    dof_locs = _basis.doflocs          # shape (2, n_p2_nodes)
+    n_nodes_2d = dof_locs.shape[1]    # == len(u[0::2]) == len(vm_stress)
+
     pts_3d = np.zeros((n_nodes_2d, 3))
-    pts_3d[:, 0] = pts[0]
-    pts_3d[:, 1] = pts[1]
+    pts_3d[:, 0] = dof_locs[0]
+    pts_3d[:, 1] = dof_locs[1]
 
     n_elems = tris.shape[1]
     faces = np.hstack(
@@ -260,10 +265,11 @@ with col_plot:
     st.subheader("📥 Export")
     ecols = st.columns(3)
 
+    # Use dof_locs for x/y coordinates (matches disp and vm_stress lengths)
     df = pd.DataFrame(
         {
-            "x": pts[0],
-            "y": pts[1],
+            "x": dof_locs[0],
+            "y": dof_locs[1],
             "disp_x": u[0::2],
             "disp_y": u[1::2],
             "von_mises_pa": vm_stress,
